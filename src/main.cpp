@@ -10,6 +10,9 @@ const char* mqtt_server = "192.168.3.250";  // Remplacer par l'adresse de ton se
 WiFiClient espClient;
 PubSubClient client(espClient);
 
+// GPIO pour la LED
+const int ledPin = 5;
+
 // Structure pour recevoir les données
 typedef struct struct_message {
   int id;        // Identifiant unique (1 ou 2)
@@ -30,6 +33,8 @@ uint8_t moteAddress[2][6] = {
   {0x24, 0xDC, 0xC3, 0x14, 0x3D, 0x70}   // Identifiant pour le capteur 2
 };
 
+esp_now_peer_info_t peerInfo[2];
+
 // Fonction callback exécutée lors de la réception des données via ESP-NOW
 void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
   struct_message receivedData;
@@ -43,6 +48,29 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
   }
 
   Serial.printf("ID : %d, Température : %.2f °C, Humidité : %.2f %%\n", receivedData.id, receivedData.x, receivedData.y);
+}
+
+// Fonction callback MQTT pour traiter les messages reçus
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  String message;
+
+  // Convertir le payload en String
+  for (int i = 0; i < length; i++) {
+    message += (char)payload[i];
+  }
+
+  Serial.printf("Message reçu sur le sujet %s : %s\n", topic, message.c_str());
+
+  // Contrôler la LED en fonction du message
+  if (String(topic) == "esp32/output") {
+    if (message == "on") {
+      digitalWrite(ledPin, HIGH);
+      Serial.println("LED allumée.");
+    } else if (message == "off") {
+      digitalWrite(ledPin, LOW);
+      Serial.println("LED éteinte.");
+    }
+  }
 }
 
 // Configuration initiale du Wi-Fi
@@ -59,11 +87,13 @@ void setup_wifi() {
 // Reconnexion au serveur MQTT si nécessaire
 void reconnect() {
   while (!client.connected()) {
-    Serial.print("Connexion au serveur MQTT...");
     if (client.connect("ESP32Client")) {
-      Serial.println("connecté.");
+      Serial.println("Connecté au serveur MQTT.");
+
+      // S'abonner au sujet pour contrôler la LED
+      client.subscribe("esp32/output");
     } else {
-      Serial.print("échec, rc=");
+      Serial.print("Échec, rc=");
       Serial.print(client.state());
       Serial.println(" nouvelle tentative dans 5 secondes.");
       delay(5000);
@@ -74,9 +104,18 @@ void reconnect() {
 void setup() {
   Serial.begin(115200);
 
+  // Configurer le GPIO pour la LED
+  pinMode(ledPin, OUTPUT);
+  digitalWrite(ledPin, LOW); // Éteindre la LED par défaut
+
   // Configuration du Wi-Fi
-  WiFi.mode(WIFI_STA);
-  setup_wifi();
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.println("Connexion au Wi-Fi...");
+  }
+  Serial.println("Wi-Fi connecté.");
 
   // Initialisation d'ESP-NOW
   if (esp_now_init() != ESP_OK) {
@@ -87,11 +126,10 @@ void setup() {
 
   // Ajouter les capteurs comme peer dans ESP-NOW
   for (int i = 0; i < 2; i++) {
-    esp_now_peer_info_t peerInfo;
-    peerInfo.channel = 0;
-    peerInfo.encrypt = false;
-    memcpy(peerInfo.peer_addr, moteAddress[i], 6);
-    if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+    peerInfo[i].channel = 0;
+    peerInfo[i].encrypt = false;
+    memcpy(peerInfo[i].peer_addr, moteAddress[i], 6);
+    if (esp_now_add_peer(&peerInfo[i]) != ESP_OK) {
       Serial.println("Erreur lors de l'ajout du peer");
       return;
     }
@@ -99,6 +137,7 @@ void setup() {
 
   // Configuration MQTT
   client.setServer(mqtt_server, 1883);
+  client.setCallback(mqttCallback);
 }
 
 void loop() {
@@ -108,14 +147,14 @@ void loop() {
   }
   client.loop();
 
-  // Gestion du délai d'envoi
+  // Gestion du délai d'envoi des données
   unsigned long currentMillis = millis();
   if (currentMillis - previousMillis >= interval) {
     previousMillis = currentMillis;
 
     // Publier les données des capteurs
     for (int i = 0; i < 2; i++) {
-      if (sensorData[i].id != 0) {  // Si des données ont été reçues
+      if (sensorData[i].id != 0) {
         char tempString[8], humString[8];
         dtostrf(sensorData[i].x, 1, 2, tempString);
         dtostrf(sensorData[i].y, 1, 2, humString);
